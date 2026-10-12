@@ -34,6 +34,26 @@ export function getAciColor(colorIndex?: number, defaultHex: string = '#38bdf8')
   return defaultHex;
 }
 
+// Helper to decode AutoCAD unicode escape sequences (e.g. \U+6客 or \U+623F) and MTEXT formatting codes
+export function decodeCadText(rawText: string): string {
+  if (!rawText) return '';
+
+  let text = rawText;
+
+  // 1. Decode \U+XXXX unicode escapes (e.g. \U+623F -> 房)
+  text = text.replace(/\\U\+([0-9A-Fa-f]{4})/g, (_, hex) => {
+    return String.fromCharCode(parseInt(hex, 16));
+  });
+
+  // 2. Clean AutoCAD MTEXT formatting controls like {\fMingLiU|b0|i0|c136|p34;文字} or \P, \A1;, \C7;
+  text = text.replace(/\{?\\f[^;]+;/g, '');
+  text = text.replace(/\\P/g, ' '); // newline to space
+  text = text.replace(/\\[A-Za-z][0-9]*;/g, '');
+  text = text.replace(/[\{\}]/g, '');
+
+  return text.trim();
+}
+
 let dwgdxfInited = false;
 
 async function ensureDwgDxfInit() {
@@ -62,7 +82,9 @@ export async function parseCadFile(file: File): Promise<CADDocument> {
     const dxfBytes = await convertDwgToDxf(dwgBytes);
     dxfText = new TextDecoder('utf-8').decode(dxfBytes);
   } else if (extension === '.dxf') {
-    dxfText = await file.text();
+    // Try reading as UTF-8 first
+    const arrayBuffer = await file.arrayBuffer();
+    dxfText = new TextDecoder('utf-8').decode(arrayBuffer);
   } else {
     throw new Error('不支援的檔案格式。請上傳 .dwg 或 .dxf 檔案。');
   }
@@ -91,7 +113,7 @@ export function parseDxfString(dxfText: string, docName: string = 'Drawing'): CA
     const rawLayers = parsedDxf.tables.layer.layers;
     for (const key in rawLayers) {
       const l = rawLayers[key];
-      const name = l.name || key;
+      const name = decodeCadText(l.name || key);
       const colorHex = getAciColor(l.colorNumber, '#ffffff');
       layers.set(name, {
         name,
@@ -105,7 +127,7 @@ export function parseDxfString(dxfText: string, docName: string = 'Drawing'): CA
 
   if (parsedDxf.entities && Array.isArray(parsedDxf.entities)) {
     for (const raw of parsedDxf.entities) {
-      const layerName = raw.layer || '0';
+      const layerName = decodeCadText(raw.layer || '0');
       if (!layers.has(layerName)) {
         layers.set(layerName, {
           name: layerName,
@@ -196,6 +218,7 @@ export function parseDxfString(dxfText: string, docName: string = 'Drawing'): CA
         case 'MTEXT': {
           if (raw.position || raw.startPoint) {
             const pos = raw.position || raw.startPoint;
+            const cleanedText = decodeCadText(raw.text || '');
             entities.push({
               id,
               type: raw.type as any,
@@ -203,7 +226,7 @@ export function parseDxfString(dxfText: string, docName: string = 'Drawing'): CA
               color: entityColor,
               colorNumber: raw.colorNumber,
               position: { x: pos.x, y: pos.y },
-              text: raw.text || '',
+              text: cleanedText,
               height: raw.height || 10,
               rotation: raw.rotation ? (raw.rotation * Math.PI) / 180 : 0
             } as TextEntity);

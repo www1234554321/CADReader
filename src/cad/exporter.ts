@@ -2,6 +2,22 @@
 import Drawing from 'dxf-writer';
 import { CADDocument } from './types';
 
+// Encode non-ASCII characters (like Chinese) into AutoCAD standard \U+XXXX unicode escape
+export function encodeDxfText(str: string): string {
+  if (!str) return '';
+  let result = '';
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    if (code > 127) {
+      const hex = code.toString(16).padStart(4, '0').toUpperCase();
+      result += `\\U+${hex}`;
+    } else {
+      result += str.charAt(i);
+    }
+  }
+  return result;
+}
+
 export function exportDocumentToDxf(doc: CADDocument): string {
   const d = new Drawing();
   d.setUnits('Millimeters');
@@ -33,17 +49,17 @@ export function exportDocumentToDxf(doc: CADDocument): string {
       case 'LWPOLYLINE':
       case 'POLYLINE': {
         if (ent.vertices && ent.vertices.length >= 2) {
-          const poly: any = d.drawPolyline(ent.vertices as any, !!ent.closed);
-          if (ent.closed && poly && typeof poly.close === 'function') {
-            poly.close();
-          }
+          // dxf-writer expects vertices as array of tuple points: [x, y] or [x, y, bulge]
+          const points = ent.vertices.map(v => [v.x, v.y, v.bulge || 0]);
+          d.drawPolyline(points as any, !!ent.closed);
         }
         break;
       }
 
       case 'TEXT':
       case 'MTEXT': {
-        d.drawText(ent.position.x, ent.position.y, ent.height || 10, 0, ent.text || '');
+        const safeText = encodeDxfText(ent.text || '');
+        d.drawText(ent.position.x, ent.position.y, ent.height || 10, 0, safeText);
         break;
       }
     }

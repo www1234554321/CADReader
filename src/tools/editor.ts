@@ -189,7 +189,8 @@ export class EditorTool {
           }
           break;
         }
-        case 'CIRCLE': {
+        case 'CIRCLE':
+        case 'ARC': {
           const distToCenter = Math.hypot(worldPt.x - ent.center.x, worldPt.y - ent.center.y);
           if (Math.abs(distToCenter - ent.radius) <= toleranceWorld) return ent;
           break;
