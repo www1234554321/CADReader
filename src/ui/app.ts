@@ -40,6 +40,11 @@ export class AppUI {
   private statusUnit: HTMLElement;
   private statusScale: HTMLElement;
 
+  // Mobile / Sidebar elements
+  private btnToggleSidebar: HTMLButtonElement | null;
+  private sidebarBackdrop: HTMLElement | null;
+  private rightSidebar: HTMLElement | null;
+
   // Sidebar elements
   private tabLayers: HTMLElement;
   private tabInspector: HTMLElement;
@@ -81,6 +86,10 @@ export class AppUI {
     this.statusUnit = document.getElementById('statusUnit')!;
     this.statusScale = document.getElementById('statusScale')!;
 
+    this.btnToggleSidebar = document.getElementById('btnToggleSidebar') as HTMLButtonElement;
+    this.sidebarBackdrop = document.getElementById('sidebarBackdrop');
+    this.rightSidebar = document.getElementById('rightSidebar');
+
     this.tabLayers = document.getElementById('tabLayers')!;
     this.tabInspector = document.getElementById('tabInspector')!;
     this.panelLayers = document.getElementById('panelLayers')!;
@@ -107,6 +116,8 @@ export class AppUI {
     this.bindToolButtons();
     this.bindEvents();
     this.bindCanvasMouseEvents();
+    this.bindTouchEvents();
+    this.bindMobileSidebarEvents();
 
     // Load initial sample drawing
     this.loadSample();
@@ -301,6 +312,130 @@ export class AppUI {
       const newText = this.inputPropText.value;
       this.editor.updateSelectedProperty({ text: newText });
     });
+  }
+
+  private bindMobileSidebarEvents() {
+    if (this.btnToggleSidebar && this.rightSidebar && this.sidebarBackdrop) {
+      const openSidebar = () => {
+        this.rightSidebar?.classList.remove('translate-x-full');
+        this.sidebarBackdrop?.classList.remove('hidden');
+      };
+
+      const closeSidebar = () => {
+        this.rightSidebar?.classList.add('translate-x-full');
+        this.sidebarBackdrop?.classList.add('hidden');
+      };
+
+      this.btnToggleSidebar.addEventListener('click', () => {
+        if (this.rightSidebar?.classList.contains('translate-x-full')) {
+          openSidebar();
+        } else {
+          closeSidebar();
+        }
+      });
+
+      this.sidebarBackdrop.addEventListener('click', closeSidebar);
+    }
+  }
+
+  private bindTouchEvents() {
+    let initialPinchDistance: number | null = null;
+    let initialZoom = 1;
+    let lastTouchCenter: { x: number; y: number } | null = null;
+
+    const getTouchCenterAndDistance = (touches: TouchList) => {
+      const rect = this.canvasEl.getBoundingClientRect();
+      if (touches.length === 1) {
+        return {
+          center: { x: touches[0].clientX - rect.left, y: touches[0].clientY - rect.top },
+          distance: 0
+        };
+      } else if (touches.length >= 2) {
+        const t1 = touches[0];
+        const t2 = touches[1];
+        const p1 = { x: t1.clientX - rect.left, y: t1.clientY - rect.top };
+        const p2 = { x: t2.clientX - rect.left, y: t2.clientY - rect.top };
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        return {
+          center: { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 },
+          distance: Math.hypot(dx, dy)
+        };
+      }
+      return null;
+    };
+
+    this.canvasEl.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 1) {
+        const rect = this.canvasEl.getBoundingClientRect();
+        const screenPt = { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
+        lastTouchCenter = screenPt;
+        if (this.measure.mode !== 'none') {
+          const worldPt = this.renderer.screenToWorld(screenPt);
+          this.measure.handlePointClick(worldPt);
+        } else {
+          this.editor.handleMouseDown(screenPt, 0);
+        }
+        this.updateStatus(screenPt);
+      } else if (e.touches.length >= 2) {
+        const touchData = getTouchCenterAndDistance(e.touches);
+        if (touchData) {
+          initialPinchDistance = touchData.distance;
+          initialZoom = this.renderer.zoom;
+          lastTouchCenter = touchData.center;
+        }
+      }
+    }, { passive: true });
+
+    this.canvasEl.addEventListener('touchmove', (e) => {
+      if (e.touches.length === 1 && lastTouchCenter) {
+        const rect = this.canvasEl.getBoundingClientRect();
+        const screenPt = { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
+        const dx = screenPt.x - lastTouchCenter.x;
+        const dy = screenPt.y - lastTouchCenter.y;
+        lastTouchCenter = screenPt;
+
+        if (this.measure.mode !== 'none') {
+          const worldPt = this.renderer.screenToWorld(screenPt);
+          this.measure.handleMouseMove(worldPt);
+        } else if (this.editor.activeMode === 'pan') {
+          this.renderer.panX += dx;
+          this.renderer.panY -= dy;
+          this.renderer.requestRender();
+        } else {
+          this.editor.handleMouseMove(screenPt, true);
+        }
+        this.updateStatus(screenPt);
+      } else if (e.touches.length >= 2 && initialPinchDistance && lastTouchCenter) {
+        const touchData = getTouchCenterAndDistance(e.touches);
+        if (touchData && touchData.distance > 0) {
+          const scaleFactor = touchData.distance / initialPinchDistance;
+          const worldBefore = this.renderer.screenToWorld(touchData.center);
+
+          this.renderer.zoom = Math.max(0.001, initialZoom * scaleFactor);
+
+          this.renderer.panX = touchData.center.x - worldBefore.x * this.renderer.zoom;
+          this.renderer.panY = (this.canvasEl.height - touchData.center.y) - worldBefore.y * this.renderer.zoom;
+
+          this.renderer.requestRender();
+          this.updateStatus(touchData.center);
+        }
+      }
+    }, { passive: true });
+
+    this.canvasEl.addEventListener('touchend', (e) => {
+      if (e.touches.length === 0) {
+        if (lastTouchCenter) {
+          this.editor.handleMouseUp(lastTouchCenter);
+        }
+        initialPinchDistance = null;
+        lastTouchCenter = null;
+      } else if (e.touches.length === 1) {
+        const rect = this.canvasEl.getBoundingClientRect();
+        lastTouchCenter = { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
+        initialPinchDistance = null;
+      }
+    }, { passive: true });
   }
 
   private loadSample() {

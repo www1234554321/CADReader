@@ -34,6 +34,110 @@ export function getAciColor(colorIndex?: number, defaultHex: string = '#38bdf8')
   return defaultHex;
 }
 
+// Helper function to decode DXF byte arrays using detected code page or encoding fallbacks
+export function decodeDxfBytes(dxfBytes: Uint8Array): string {
+  const headSample = new TextDecoder('latin1').decode(dxfBytes.subarray(0, 8192));
+
+  let primaryEncoding = 'utf-8';
+  if (headSample.includes('ANSI_950') || headSample.includes('Big5') || headSample.includes('BIG5')) {
+    primaryEncoding = 'big5';
+  } else if (headSample.includes('ANSI_936') || headSample.includes('GBK') || headSample.includes('GB2312')) {
+    primaryEncoding = 'gbk';
+  } else if (headSample.includes('ANSI_932') || headSample.includes('Shift_JIS')) {
+    primaryEncoding = 'shift-jis';
+  }
+
+  // Try primary encoding
+  try {
+    const text = new TextDecoder(primaryEncoding).decode(dxfBytes);
+    if (!text.includes('\uFFFD')) {
+      return text;
+    }
+  } catch (e) {
+    // ignore decoding errors
+  }
+
+  // Fallback try Big5
+  try {
+    const textBig5 = new TextDecoder('big5').decode(dxfBytes);
+    if (!textBig5.includes('\uFFFD')) {
+      return textBig5;
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  // Fallback try GBK
+  try {
+    const textGbk = new TextDecoder('gbk').decode(dxfBytes);
+    if (!textGbk.includes('\uFFFD')) {
+      return textGbk;
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  // Default UTF-8
+  return new TextDecoder('utf-8').decode(dxfBytes);
+}
+
+// Helper to fix mojibake (e.g. Big5/GBK bytes mis-decoded as latin-1 or Windows-1252 string)
+export function fixMojibake(str: string): string {
+  if (!str) return '';
+
+  // If string contains non-ASCII characters that might be Latin-1 / Windows-1252 encoded bytes
+  let needsFix = false;
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    if (code >= 0x80 && code <= 0xFF) {
+      needsFix = true;
+      break;
+    }
+  }
+
+  if (!needsFix) return str;
+
+  const bytes = new Uint8Array(str.length);
+  for (let i = 0; i < str.length; i++) {
+    bytes[i] = str.charCodeAt(i) & 0xFF;
+  }
+
+  try {
+    const textBig5 = new TextDecoder('big5').decode(bytes);
+    if (!textBig5.includes('\uFFFD')) return textBig5;
+  } catch (e) {}
+
+  try {
+    const textGbk = new TextDecoder('gbk').decode(bytes);
+    if (!textGbk.includes('\uFFFD')) return textGbk;
+  } catch (e) {}
+
+  return str;
+}
+
+// Helper to decode AutoCAD unicode escape sequences (e.g. \U+6客 or \U+623F) and MTEXT formatting codes
+export function decodeCadText(rawText: string): string {
+  if (!rawText) return '';
+
+  let text = rawText;
+
+  // 1. Decode \U+XXXX unicode escapes (e.g. \U+623F -> 房)
+  text = text.replace(/\\U\+([0-9A-Fa-f]{4})/g, (_, hex) => {
+    return String.fromCharCode(parseInt(hex, 16));
+  });
+
+  // 2. Clean AutoCAD MTEXT formatting controls like {\fMingLiU|b0|i0|c136|p34;文字} or \P, \A1;, \C7;
+  text = text.replace(/\{?\\f[^;]+;/g, '');
+  text = text.replace(/\\P/g, ' '); // newline to space
+  text = text.replace(/\\[A-Za-z][0-9]*;/g, '');
+  text = text.replace(/[\{\}]/g, '');
+
+  // 3. Fix mojibake characters if parsed as latin1
+  text = fixMojibake(text);
+
+  return text.trim();
+}
+
 let dwgdxfInited = false;
 
 async function ensureDwgDxfInit() {
@@ -60,9 +164,10 @@ export async function parseCadFile(file: File): Promise<CADDocument> {
     const arrayBuffer = await file.arrayBuffer();
     const dwgBytes = new Uint8Array(arrayBuffer);
     const dxfBytes = await convertDwgToDxf(dwgBytes);
-    dxfText = new TextDecoder('utf-8').decode(dxfBytes);
+    dxfText = decodeDxfBytes(dxfBytes);
   } else if (extension === '.dxf') {
-    dxfText = await file.text();
+    const arrayBuffer = await file.arrayBuffer();
+    dxfText = decodeDxfBytes(new Uint8Array(arrayBuffer));
   } else {
     throw new Error('不支援的檔案格式。請上傳 .dwg 或 .dxf 檔案。');
   }
@@ -91,7 +196,7 @@ export function parseDxfString(dxfText: string, docName: string = 'Drawing'): CA
     const rawLayers = parsedDxf.tables.layer.layers;
     for (const key in rawLayers) {
       const l = rawLayers[key];
-      const name = l.name || key;
+      const name = decodeCadText(l.name || key);
       const colorHex = getAciColor(l.colorNumber, '#ffffff');
       layers.set(name, {
         name,
@@ -105,7 +210,7 @@ export function parseDxfString(dxfText: string, docName: string = 'Drawing'): CA
 
   if (parsedDxf.entities && Array.isArray(parsedDxf.entities)) {
     for (const raw of parsedDxf.entities) {
-      const layerName = raw.layer || '0';
+      const layerName = decodeCadText(raw.layer || '0');
       if (!layers.has(layerName)) {
         layers.set(layerName, {
           name: layerName,
@@ -196,6 +301,7 @@ export function parseDxfString(dxfText: string, docName: string = 'Drawing'): CA
         case 'MTEXT': {
           if (raw.position || raw.startPoint) {
             const pos = raw.position || raw.startPoint;
+            const cleanedText = decodeCadText(raw.text || '');
             entities.push({
               id,
               type: raw.type as any,
@@ -203,7 +309,7 @@ export function parseDxfString(dxfText: string, docName: string = 'Drawing'): CA
               color: entityColor,
               colorNumber: raw.colorNumber,
               position: { x: pos.x, y: pos.y },
-              text: raw.text || '',
+              text: cleanedText,
               height: raw.height || 10,
               rotation: raw.rotation ? (raw.rotation * Math.PI) / 180 : 0
             } as TextEntity);
